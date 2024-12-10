@@ -103,7 +103,7 @@ struct SocketDict {
  - note: Unless one of `socketDidReset(_:)`, `socketDidAbort(_:)` or `socketDidClose(_:)` delegation methods is called, please do `close()`the socket actively and wait for `socketDidClose(_:)` before releasing it.
  - note: This class is NOT thread-safe, make sure every method call is on the same dispatch queue as `TSIPStack`.
  */
-public final class TSTCPSocket {
+public final class TSTCPSocket : Sendable {
     fileprivate var pcb: UnsafeMutablePointer<tcp_pcb>?
     /// The source IPv4 address.
     public let sourceAddress: in_addr
@@ -135,7 +135,7 @@ public final class TSTCPSocket {
      */
     public weak var delegate: TSTCPSocketDelegate?
     
-    init(pcb: UnsafeMutablePointer<tcp_pcb>, queue: DispatchQueue) {
+    init(pcb: UnsafeMutablePointer<tcp_pcb>) {
         self.pcb = pcb
         
         // see comments in "lwip/src/core/ipv4/ip.c"

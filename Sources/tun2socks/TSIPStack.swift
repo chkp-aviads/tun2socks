@@ -1,7 +1,10 @@
 import Foundation
 import lwip
+import NIO
+import NIOTransportServices
 
 /// The delegate that the developer should implement to handle what to do when a new TCP socket is connected.
+@available(iOS 13.0, *)
 public protocol TSIPStackDelegate: class {
     /**
      A new TCP socket is accepted. This means we received a new TCP packet containing SYN signal.
@@ -11,10 +14,12 @@ public protocol TSIPStackDelegate: class {
     func didAcceptTCPSocket(_ sock: TSTCPSocket)
 }
 
+@available(iOS 13.0, *)
 func tcpAcceptFn(_ arg: UnsafeMutableRawPointer?, pcb: UnsafeMutablePointer<tcp_pcb>?, error: err_t) -> err_t {
     return TSIPStack.stack.didAcceptTCPSocket(pcb!, error: error)
 }
 
+@available(iOS 13.0, *)
 func outputPCB(_ interface: UnsafeMutablePointer<netif>?, buf: UnsafeMutablePointer<pbuf>?, ipaddr: UnsafeMutablePointer<ip_addr_t>?) -> err_t {
     TSIPStack.stack.writeOut(pbuf: buf!)
     return err_t(ERR_OK)
@@ -30,20 +35,20 @@ func outputPCB(_ interface: UnsafeMutablePointer<netif>?, buf: UnsafeMutablePoin
  
  - note: This class is NOT thread-safe.
  */
-public final class TSIPStack {
+@available(iOS 13.0, *)
+/* This class uses EventLoop to ensure thread safety. Caller must ensure its safety */
+public final class TSIPStack : @unchecked Sendable  {
     /// The singleton stack instance that developer should use. The `init()` method is a private method, which means there will never be more than one IP stack running at the same time.
-    public static var stack = TSIPStack()
-    
-    // The whole stack is running in this dispatch queue.
-    public var processQueue = DispatchQueue(label: "tun2socks.IPStackQueue", attributes: [])
-    
-    var timer: DispatchSourceTimer?
+    public static let stack = TSIPStack()
+
+    var timerTask: RepeatedTask?
     let listenPCB: UnsafeMutablePointer<tcp_pcb>
+    public let eventLoop : EventLoop
     
     /// When the IP stack decides to output some IP packets, this block is called.
     ///
     /// - warning: This should be set before any input.
-    public var outputBlock: (([Data], [NSNumber]) -> ())!
+    public var outputBlock: (@Sendable ([Data], [NSNumber]) -> ())!
     
     /// The delegate instance.
     ///
@@ -57,6 +62,7 @@ public final class TSIPStack {
     }
     
     private init() {
+        eventLoop = NIOTSEventLoopGroup.singleton.any()
         lwip_init()
         
         // add a listening pcb
@@ -70,19 +76,21 @@ public final class TSIPStack {
         netif_list.pointee.output = outputPCB
     }
     
-    private func checkTimeout() {
-        sys_check_timeouts()
+    public func stop() {
+        delegate = nil
+        suspendTimer()
     }
     
-    func dispatch_call(_ block: @escaping () -> ()) {
-        processQueue.async(execute: block)
+    private func checkTimeout() {
+        sys_check_timeouts()
     }
     
     /**
      Suspend the timer. The timer should be suspended when the device is going to sleep.
      */
     public func suspendTimer() {
-        timer = nil
+        timerTask?.cancel()
+        timerTask = nil
     }
     
     /**
@@ -91,16 +99,16 @@ public final class TSIPStack {
      - warning: Do not call this unless the stack is not resumed or you suspend the timer.
      */
     public func resumeTimer() {
-        timer = DispatchSource.makeTimerSource(queue: processQueue)
-        // note the default tcp_tmr interval is 250 ms.
-        // I don't know the best way to set leeway.
-        timer!.schedule(deadline: DispatchTime.distantFuture , repeating: DispatchTimeInterval.microseconds(250), leeway: DispatchTimeInterval.microseconds(250))
-        timer!.setEventHandler {
-            [weak self] in
+        // Cancel any existing timer task
+        timerTask?.cancel()
+        
+        let interval: TimeAmount = .milliseconds(250) // 250 microseconds
+        
+        // Schedule a repeating task on the event loop
+        timerTask = eventLoop.scheduleRepeatedTask(initialDelay: .milliseconds(0), delay: interval) { [weak self] task in
             self?.checkTimeout()
         }
         sys_restart_timeouts()
-        timer!.resume()
     }
     
     /**
@@ -124,12 +132,12 @@ public final class TSIPStack {
             pbuf_copy_partial(pbuf, p.baseAddress, pbuf.pointee.tot_len, 0)
         }
         // Only support IPv4 as of now.
-        outputBlock([data], [NSNumber(value: AF_INET)])
+        outputBlock([data], [ NSNumber(value: AF_INET) ])
     }
     
     func didAcceptTCPSocket(_ pcb: UnsafeMutablePointer<tcp_pcb>, error: err_t) -> err_t {
         tcp_accepted_c(listenPCB)
-        delegate?.didAcceptTCPSocket(TSTCPSocket(pcb: pcb, queue: processQueue))
+        delegate?.didAcceptTCPSocket(TSTCPSocket(pcb: pcb))
         return err_t(ERR_OK)
     }
 }
