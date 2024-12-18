@@ -136,7 +136,7 @@ public final class TSIPStack : @unchecked Sendable  {
     
     func didAcceptTCPSocket(_ pcb: UnsafeMutablePointer<tcp_pcb>, error: err_t) -> err_t {
         tcp_accepted_c(listenPCB)
-        delegate?.didAcceptTCPSocket(TSTCPSocket(pcb: pcb))
+        delegate?.didAcceptTCPSocket(TSTCPSocket(pcb: pcb, stackEventLoop: eventLoop, socketEventLoop: NIOTSEventLoopGroup.singleton.next()))
         return err_t(ERR_OK)
     }
 }

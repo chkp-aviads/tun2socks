@@ -1,5 +1,6 @@
 import Foundation
 import lwip
+import NIOCore
 
 /**
  The delegate that developer should implement to handle various TCP events.
@@ -54,7 +55,9 @@ func tcp_recv_func(_ arg: UnsafeMutableRawPointer?, pcb: UnsafeMutablePointer<tc
         tcp_abort(pcb!)
         return err_t(ERR_ABRT)
     }
-    socket.recved(buf)
+    socket.socketEventLoop.execute {
+        socket.recved(buf)
+    }
     return err_t(ERR_OK)
 }
 
@@ -66,14 +69,20 @@ func tcp_sent_func(_ arg: UnsafeMutableRawPointer?, pcb: UnsafeMutablePointer<tc
         tcp_abort(pcb!)
         return err_t(ERR_ABRT)
     }
-    socket.sent(Int(len))
+    socket.socketEventLoop.execute {
+        socket.sent(Int(len))
+    }
     return err_t(ERR_OK)
 }
 
 func tcp_err_func(_ arg: UnsafeMutableRawPointer?, error: err_t) {
     assert(arg != nil)
     
-    SocketDict.lookup(arg!)?.errored(error)
+    if let socket = SocketDict.lookup(arg!) {
+        socket.socketEventLoop.execute {
+            socket.errored(error)
+        }
+    }
 }
 
 struct SocketDict {
@@ -104,6 +113,8 @@ struct SocketDict {
  - note: This class is NOT thread-safe, make sure every method call is on the same dispatch queue as `TSIPStack`.
  */
 public final class TSTCPSocket : Sendable {
+    public let stackEventLoop : EventLoop  // The event loop that the stack is running on.
+    public let socketEventLoop: EventLoop    // The event loop that this socket is running on.
     fileprivate var pcb: UnsafeMutablePointer<tcp_pcb>?
     /// The source IPv4 address.
     public let sourceAddress: in_addr
@@ -120,11 +131,13 @@ public final class TSTCPSocket : Sendable {
     
     
     var isValid: Bool {
+        socketEventLoop.assertInEventLoop()
         return pcb != nil
     }
     
     /// Whether the socket is connected (we can receive and send data).
     public var isConnected: Bool {
+        socketEventLoop.assertInEventLoop()
         return isValid && pcb!.pointee.state != CLOSED
     }
     
@@ -135,8 +148,10 @@ public final class TSTCPSocket : Sendable {
      */
     public weak var delegate: TSTCPSocketDelegate?
     
-    init(pcb: UnsafeMutablePointer<tcp_pcb>) {
+    init(pcb: UnsafeMutablePointer<tcp_pcb>, stackEventLoop: EventLoop, socketEventLoop: EventLoop) {
         self.pcb = pcb
+        self.stackEventLoop = stackEventLoop
+        self.socketEventLoop = socketEventLoop
         
         // see comments in "lwip/src/core/ipv4/ip.c"
         sourcePort = pcb.pointee.remote_port
@@ -156,6 +171,7 @@ public final class TSTCPSocket : Sendable {
     }
     
     func errored(_ error: err_t) {
+        socketEventLoop.assertInEventLoop()
         release()
         switch Int32(error) {
         case ERR_RST:
@@ -168,10 +184,12 @@ public final class TSTCPSocket : Sendable {
     }
     
     func sent(_ length: Int) {
+        socketEventLoop.assertInEventLoop()
         delegate?.didWriteData(length, from: self)
     }
     
     func recved(_ buf: UnsafeMutablePointer<pbuf>?) {
+        socketEventLoop.assertInEventLoop()
         if buf == nil {
             delegate?.localDidClose(self)
         } else {
@@ -191,6 +209,7 @@ public final class TSTCPSocket : Sendable {
      - parameter data: The data to send.
      */
     public func writeData(_ data: Data) {
+        socketEventLoop.assertInEventLoop()
         guard isValid else {
             return
         }
@@ -207,6 +226,7 @@ public final class TSTCPSocket : Sendable {
      Close the socket. The socket should not be read or write again.
      */
     public func close() {
+        socketEventLoop.assertInEventLoop()
         guard isValid else {
             return
         }
@@ -227,6 +247,7 @@ public final class TSTCPSocket : Sendable {
      Reset the socket. The socket should not be read or write again.
      */
     public func reset() {
+        socketEventLoop.assertInEventLoop()
         guard isValid else {
             return
         }
@@ -243,12 +264,13 @@ public final class TSTCPSocket : Sendable {
     }
     
     func release() {
+        socketEventLoop.assertInEventLoop()
         pcb = nil
         identityArg.deinitialize(count: 1)
         identityArg.deallocate()
-        SocketDict.socketDict.removeValue(forKey: identity)
-    }
-    
-    deinit {
+        
+        stackEventLoop.execute { [identity] in
+            SocketDict.socketDict.removeValue(forKey: identity)
+        }
     }
 }
