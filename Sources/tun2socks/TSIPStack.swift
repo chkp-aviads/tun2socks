@@ -77,7 +77,6 @@ public final class TSIPStack : @unchecked Sendable  {
     }
     
     public func stop() {
-        delegate = nil
         suspendTimer()
     }
     
